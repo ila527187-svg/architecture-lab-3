@@ -1,37 +1,31 @@
-
 import { database } from "../database.ts";
 import type { CartLine } from "../shared/calculateTotal.ts";
+import { InventoryService } from "../inventory/index.ts";
 import {
-  StripeClient,
-  type StripePayload,
-} from "../payments/internal/StripeClient.ts";
-import { normalizePaymentStatus } from "../payments/internal/normalizePaymentStatus.ts";
+  PaymentService,
+  type PaymentRequest,
+} from "../payments/index.ts";
 
 export class OrderService {
-  private readonly stripe: StripeClient;
+  private readonly payments: Pick<PaymentService, "authorize">;
+  private readonly inventory: InventoryService;
 
-  constructor(stripe = new StripeClient()) {
-    this.stripe = stripe;
+  constructor(
+    payments: Pick<PaymentService, "authorize"> = new PaymentService(),
+    inventory: InventoryService = new InventoryService()
+  ) {
+    this.payments = payments;
+    this.inventory = inventory;
   }
 
   async placeOrder(
     orderId: string,
-    lines: CartLine[],
+    lines: readonly CartLine[],
     total: number,
-    payload: StripePayload
+    payment: Pick<PaymentRequest, "paymentToken" | "currency">
   ) {
-    for (const line of lines) {
-      const row = database.stock.get(line.productId);
-
-      if (!row || row.available < line.quantity) {
-        throw new Error(`Insufficient stock for ${line.productId}`);
-      }
-
-      database.stock.set(line.productId, {
-        productId: line.productId,
-        available: row.available - line.quantity,
-      });
-    }
+    // Резервування повністю належить Inventory.
+    this.inventory.reserve(lines);
 
     database.orders.set(orderId, {
       id: orderId,
@@ -39,19 +33,20 @@ export class OrderService {
       total,
     });
 
-    const providerResponse = await this.stripe.createCharge(payload);
-
-    const paymentStatus = normalizePaymentStatus(
-      "stripe",
-      providerResponse.state
-    );
+    // Orders знає лише публічний контракт Payments.
+    const result = await this.payments.authorize({
+      orderId,
+      paymentToken: payment.paymentToken,
+      amount: total,
+      currency: payment.currency,
+    });
 
     const order = database.orders.get(orderId)!;
 
-    order.paymentStatus = paymentStatus;
+    order.paymentStatus = result.status;
 
     order.status =
-      paymentStatus === "paid"
+      result.status === "paid"
         ? "confirmed"
         : "payment_pending";
 

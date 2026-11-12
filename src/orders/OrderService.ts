@@ -1,36 +1,55 @@
 import { database } from "../database.ts";
 import type { CartLine } from "../shared/calculateTotal.ts";
-// Deliberate boundary violation: Orders depends on a Payments implementation detail.
-import { StripeClient, type StripePayload } from "../payments/internal/StripeClient.ts";
-import { mapPaymentStatus } from "./mapPaymentStatus.ts";
+import { InventoryService } from "../inventory/index.ts";
+import {
+  PaymentService,
+  type PaymentRequest,
+} from "../payments/index.ts";
 
 export class OrderService {
-  private readonly stripe: StripeClient;
+  private readonly payments: Pick<PaymentService, "authorize">;
+  private readonly inventory: InventoryService;
 
-  constructor(stripe = new StripeClient()) {
-    this.stripe = stripe;
+  constructor(
+    payments: Pick<PaymentService, "authorize"> = new PaymentService(),
+    inventory: InventoryService = new InventoryService()
+  ) {
+    this.payments = payments;
+    this.inventory = inventory;
   }
 
-  async placeOrder(orderId: string, lines: CartLine[], total: number, payload: StripePayload) {
-    for (const line of lines) {
-      const row = database.stock.get(line.productId);
-      if (!row || row.available < line.quantity) {
-        throw new Error(`Insufficient stock for ${line.productId}`);
-      }
+  async placeOrder(
+    orderId: string,
+    lines: readonly CartLine[],
+    total: number,
+    payment: Pick<PaymentRequest, "paymentToken" | "currency">
+  ) {
+    // Резервування повністю належить Inventory.
+    this.inventory.reserve(lines);
 
-      // Deliberate ownership violation: Orders writes Inventory storage directly.
-      database.stock.set(line.productId, {
-        productId: line.productId,
-        available: row.available - line.quantity,
-      });
-    }
+    database.orders.set(orderId, {
+      id: orderId,
+      status: "created",
+      total,
+    });
 
-    database.orders.set(orderId, { id: orderId, status: "created", total });
-    const providerResponse = await this.stripe.createCharge(payload);
-    const paymentStatus = mapPaymentStatus(providerResponse);
+    // Orders знає лише публічний контракт Payments.
+    const result = await this.payments.authorize({
+      orderId,
+      paymentToken: payment.paymentToken,
+      amount: total,
+      currency: payment.currency,
+    });
+
     const order = database.orders.get(orderId)!;
-    order.paymentStatus = paymentStatus;
-    order.status = paymentStatus === "paid" ? "confirmed" : "payment_pending";
+
+    order.paymentStatus = result.status;
+
+    order.status =
+      result.status === "paid"
+        ? "confirmed"
+        : "payment_pending";
+
     return { ...order };
   }
 }

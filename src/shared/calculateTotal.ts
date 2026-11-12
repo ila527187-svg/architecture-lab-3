@@ -1,23 +1,29 @@
-import { auditLog, runtimeConfig } from "../config.ts";
-
-export type CartLine = {
+export type CartLine = Readonly<{
   productId: string;
   unitPrice: number;
   quantity: number;
   lineTotal?: number;
-};
+}>;
 
-// Intentionally impure: this function reads globals, mutates its argument and logs.
-export function calculateTotal(lines: CartLine[]): number {
+export type PricingOptions = Readonly<{
+  taxRate: number;
+  discountPercent: number;
+}>;
+
+export function calculateTotal(
+  lines: readonly CartLine[],
+  options: PricingOptions
+): number {
   let subtotal = 0;
 
   for (const line of lines) {
-    line.lineTotal = line.unitPrice * line.quantity;
-    subtotal += line.lineTotal;
+    subtotal += line.unitPrice * line.quantity;
   }
 
-  const discounted = subtotal * (1 - runtimeConfig.discountPercent / 100);
-  const total = Number((discounted * (1 + runtimeConfig.taxRate)).toFixed(2));
-  auditLog.push(`total_calculated:${total}`);
-  return total;
+  const discounted =
+    subtotal * (1 - options.discountPercent / 100);
+
+  return Number(
+    (discounted * (1 + options.taxRate)).toFixed(2)
+  );
 }
